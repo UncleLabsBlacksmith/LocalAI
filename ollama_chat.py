@@ -13,10 +13,12 @@ Local AI Chat — Ollama desktop client (Tkinter, no external dependencies)
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import queue
 import re
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -100,6 +102,8 @@ class OllamaClient:
         self.host = host.rstrip("/")
         self._lock = threading.Lock()
         self._response = None
+        self._pull_lock = threading.Lock()
+        self._pull_response = None
 
     def _open(self, path: str, payload=None, method="GET", timeout=15):
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -157,6 +161,40 @@ class OllamaClient:
         """ปิด socket ทันที — ไม่ต้องรอ token ถัดไปเหมือนโค้ดเดิม"""
         with self._lock:
             response = self._response
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def pull_model(self, model: str, timeout=120):
+        """yield dict ความคืบหน้าทีละบรรทัดจาก /api/pull จนกว่าจะ success/error"""
+        payload = {"model": model, "name": model, "stream": True}
+        response = self._open("/api/pull", payload, "POST", timeout)
+        with self._pull_lock:
+            self._pull_response = response
+        try:
+            for raw in response:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if obj.get("error"):
+                    raise OllamaError(str(obj["error"]))
+                yield obj
+                if obj.get("status") == "success":
+                    break
+        finally:
+            with self._pull_lock:
+                self._pull_response = None
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    def cancel_pull(self) -> None:
+        with self._pull_lock:
+            response = self._pull_response
         if response is not None:
             try:
                 response.close()
@@ -239,24 +277,29 @@ def _insert_link(widget, label: str, url: str) -> None:
     widget.tag_bind(tag, "<Leave>", lambda e: widget.configure(cursor=""))
 
 
-def insert_inline(widget, text: str, base="body") -> None:
+def insert_inline(widget, text: str, base="body", plain=False) -> None:
+    """plain=True: ตัดสัญลักษณ์ markdown ออกแต่คงแท็ก base ไว้ตัวเดียว —
+    ใช้กับ heading ที่มี **bold**/`code`/ลิงก์ซ้อนอยู่ เพื่อไม่ให้เหลือสัญลักษณ์ดิบให้เห็น"""
     for part in INLINE_RE.split(text):
         if not part:
             continue
         if part.startswith("**") and part.endswith("**"):
-            widget.insert("end", part[2:-2], "bold")
+            widget.insert("end", part[2:-2], base if plain else "bold")
         elif part.startswith("~~") and part.endswith("~~"):
-            widget.insert("end", part[2:-2], "strike")
+            widget.insert("end", part[2:-2], base if plain else "strike")
         elif part.startswith("`") and part.endswith("`"):
-            widget.insert("end", part[1:-1], "icode")
+            widget.insert("end", part[1:-1], base if plain else "icode")
         elif part.startswith("["):
             match = LINK_RE.match(part)
             if match:
-                _insert_link(widget, match.group(1), match.group(2))
+                if plain:
+                    widget.insert("end", match.group(1), base)
+                else:
+                    _insert_link(widget, match.group(1), match.group(2))
             else:
                 widget.insert("end", part, base)
         elif part.startswith("*") and part.endswith("*") and len(part) > 2:
-            widget.insert("end", part[1:-1], "italic")
+            widget.insert("end", part[1:-1], base if plain else "italic")
         else:
             widget.insert("end", part, base)
 
@@ -313,8 +356,9 @@ def insert_markdown(widget, text: str) -> None:
             continue
         if stripped.startswith("#"):
             level = len(stripped) - len(stripped.lstrip("#"))
-            widget.insert("end", stripped.lstrip("# ").strip() + "\n",
-                          "h1" if level <= 2 else "h3")
+            heading_tag = "h1" if level <= 2 else "h3"
+            insert_inline(widget, stripped.lstrip("# ").strip(), base=heading_tag, plain=True)
+            widget.insert("end", "\n", heading_tag)
             index += 1
             continue
         if stripped.startswith(("- ", "* ")):
@@ -362,6 +406,103 @@ class ChatStore:
                 "title": "แชตใหม่", "messages": [], "created_at": now, "updated_at": now}
 
 
+# -------------------------------------------------------- model library ----
+LIBRARY_URL = "https://ollama.com/library"
+_CARD_RE = re.compile(
+    r'<a href="/library/([a-zA-Z0-9_.\-]+)" class="group[^"]*">(.*?)</a>\s*</li>', re.S)
+_DESC_RE = re.compile(r'<p class="max-w-lg break-words text-neutral-800 text-md">(.*?)</p>', re.S)
+_SIZE_RE = re.compile(r'bg-\[#ddf4ff\][^"]*">([a-zA-Z0-9.]+)</span>')
+_CAP_RE = re.compile(r'bg-indigo-50[^"]*">([a-zA-Z]+)</span>')
+_PULLS_RE = re.compile(r'<span >([0-9.]+[KMB]?)</span>\s*<span class="hidden sm:flex">&nbsp;Pulls</span>')
+_TAG_STRIP_RE = re.compile(r"<[^>]+>")
+_PARAM_RE = re.compile(r"^e?(\d+(?:\.\d+)?)([mb])$")
+
+
+def fetch_model_library(timeout=15) -> list[dict]:
+    """ดึงรายชื่อโมเดลทั้งหมดจาก ollama.com/library (พาร์ส HTML ตรง ๆ ไม่มี API อย่างเป็นทางการ)"""
+    request = urllib.request.Request(LIBRARY_URL, headers={"User-Agent": "Mozilla/5.0"})
+    page = urllib.request.urlopen(request, timeout=timeout).read().decode("utf-8", "replace")
+    models = []
+    for name, body in _CARD_RE.findall(page):
+        desc_match = _DESC_RE.search(body)
+        description = html.unescape(_TAG_STRIP_RE.sub("", desc_match.group(1))).strip() \
+            if desc_match else ""
+        pulls_match = _PULLS_RE.search(body)
+        models.append({
+            "name": name,
+            "description": description,
+            "sizes": _SIZE_RE.findall(body),
+            "capabilities": sorted(set(_CAP_RE.findall(body))),
+            "pulls": pulls_match.group(1) if pulls_match else "",
+        })
+    return models
+
+
+def _pulls_to_number(pulls: str) -> float:
+    pulls = pulls.strip()
+    if not pulls:
+        return 0.0
+    multiplier = {"K": 1e3, "M": 1e6, "B": 1e9}.get(pulls[-1], None)
+    try:
+        return float(pulls[:-1]) * multiplier if multiplier else float(pulls)
+    except ValueError:
+        return 0.0
+
+
+def estimate_model_gb(size_tag: str) -> float | None:
+    """ประมาณขนาดไฟล์แบบ 4-bit quantized จากจำนวนพารามิเตอร์ในชื่อแท็ก เช่น '8b' -> ~6GB (ค่าประมาณ)"""
+    match = _PARAM_RE.match(size_tag.lower())
+    if not match:
+        return None
+    value, unit = match.groups()
+    params_billion = float(value) / 1000 if unit == "m" else float(value)
+    return round(params_billion * 0.75, 1)
+
+
+def recommend_tier(needed_gb: float | None, ram_gb: float | None) -> str:
+    """good = พอสบาย, tight = พอดี/เสี่ยงช้า, toolarge = เกิน RAM ที่มี, unknown = ประมาณไม่ได้"""
+    if needed_gb is None or ram_gb is None:
+        return "unknown"
+    if needed_gb <= ram_gb * 0.5:
+        return "good"
+    if needed_gb <= ram_gb * 0.85:
+        return "tight"
+    return "toolarge"
+
+
+def detect_system_ram_gb() -> float | None:
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))  # type: ignore[attr-defined]
+        return status.ullTotalPhys / (1024 ** 3)
+    except Exception:
+        return None
+
+
+def detect_gpu_vram_gb() -> float | None:
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3)
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip().splitlines()[0]) / 1024
+    except Exception:
+        pass
+    return None
+
+
 # ------------------------------------------------------------------ app ----
 # (attr, offset จาก font_size, ขนาดต่ำสุด) — ต่ำสุดกันไม่ให้ UI เล็กจนอ่านไม่ออกตอนซูมออกสุด
 FONT_SPEC = (
@@ -388,6 +529,8 @@ class ChatApp:
         self.stream_think_text = ""
         self.stream_content_text = ""
         self.current_chat: dict | None = None
+        self.system_ram_gb: float | None = None
+        self.system_vram_gb: float | None = None
 
         self._init_fonts()
         self._build_ui()
@@ -397,6 +540,11 @@ class ChatApp:
         self.root.after(40, self._process_events)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         threading.Thread(target=self._refresh_models, daemon=True).start()
+        threading.Thread(target=self._detect_system_spec, daemon=True).start()
+
+    def _detect_system_spec(self):
+        self.system_ram_gb = detect_system_ram_gb()
+        self.system_vram_gb = detect_gpu_vram_gb()
 
     # ------------------------------------------------------------ fonts --
     def _init_fonts(self):
@@ -480,6 +628,10 @@ class ChatApp:
                                       values=[self.cfg.model], font=self.f_ui)
         self.model_box.pack(fill="x", padx=12)
         self.model_box.bind("<<ComboboxSelected>>", self.on_model_change)
+
+        self._flat_button(sidebar, "⬇  ดาวน์โหลดโมเดลใหม่", self.open_model_browser,
+                          anchor="w", bg=SIDEBAR, fg=MUTED, activebackground=SIDEBAR,
+                          padx=0, pady=6).pack(fill="x", padx=12)
 
         tk.Label(sidebar, text="ค้นหาในประวัติ", bg=SIDEBAR, fg=MUTED,
                  font=self.f_small).pack(anchor="w", padx=18, pady=(16, 4))
@@ -1002,6 +1154,9 @@ class ChatApp:
     def open_settings(self):
         SettingsDialog(self.root, self)
 
+    def open_model_browser(self):
+        ModelBrowserDialog(self.root, self)
+
     def apply_settings(self, new_cfg: Config):
         host_changed = new_cfg.host != self.cfg.host
         self.cfg = new_cfg
@@ -1101,6 +1256,275 @@ class SettingsDialog(tk.Toplevel):
         cfg.think = bool(self.think.get())
         self.app.apply_settings(cfg)
         self.destroy()
+
+
+# -------------------------------------------------------- model browser ----
+TIER_LABEL = {"good": "✓ เหมาะกับเครื่องนี้", "tight": "⚠ ค่อนข้างเต็ม RAM",
+              "toolarge": "✗ ใหญ่เกินไปสำหรับเครื่องนี้", "unknown": ""}
+TIER_TAG = {"good": "chip_good", "tight": "chip_tight",
+            "toolarge": "chip_bad", "unknown": "chip_neutral"}
+
+
+class ModelBrowserDialog(tk.Toplevel):
+    """เรียกดูรายชื่อโมเดลจาก ollama.com/library พร้อมคำแนะนำตามสเปกเครื่อง แล้วดาวน์โหลดผ่าน /api/pull"""
+
+    def __init__(self, master, app: ChatApp):
+        super().__init__(master, bg=BG)
+        self.app = app
+        self.title("ดาวน์โหลดโมเดล — ollama.com/library")
+        self.geometry("760x640")
+        self.minsize(560, 420)
+        self.transient(master)
+
+        self.models: list[dict] = []
+        self.pulling = False
+        self.cancel_event: threading.Event | None = None
+        self.pull_queue: queue.Queue = queue.Queue()
+
+        self._build_widgets()
+        self.list_text.configure(state="normal")
+        self.list_text.insert("1.0", "กำลังโหลดรายชื่อโมเดลจาก ollama.com/library ...", "cat_muted")
+        self.list_text.configure(state="disabled")
+        threading.Thread(target=self._load_catalog, daemon=True).start()
+        self.protocol("WM_DELETE_WINDOW", self._on_dialog_close)
+        self.grab_set()
+
+    def _on_dialog_close(self):
+        if self.pulling:
+            if not messagebox.askyesno(
+                    "ปิดหน้าต่าง", "กำลังดาวน์โหลดโมเดลอยู่ ต้องการยกเลิกและปิดหรือไม่?",
+                    parent=self):
+                return
+            self._cancel_pull()
+        self.destroy()
+
+    # -------------------------------------------------------------- ui --
+    def _build_widgets(self):
+        app = self.app
+        top = tk.Frame(self, bg=BG)
+        top.pack(fill="x", padx=16, pady=(14, 8))
+        tk.Label(top, text="ค้นหาโมเดล:", bg=BG, fg=MUTED, font=app.f_small).pack(side="left")
+        self.search_var = tk.StringVar()
+        search = tk.Entry(top, textvariable=self.search_var, bg=INPUT_BG, fg=TEXT,
+                          insertbackground=TEXT, relief="flat", font=app.f_ui)
+        search.pack(side="left", fill="x", expand=True, padx=8, ipady=4)
+        self.search_var.trace_add("write", lambda *_: self._render_catalog())
+
+        spec_bits = []
+        if app.system_ram_gb:
+            spec_bits.append(f"RAM ~{app.system_ram_gb:.0f} GB")
+        if app.system_vram_gb:
+            spec_bits.append(f"GPU VRAM ~{app.system_vram_gb:.0f} GB")
+        spec_text = ("สเปกเครื่อง: " + " · ".join(spec_bits)) if spec_bits else \
+            "ตรวจสเปกเครื่องไม่สำเร็จ — จะไม่มีคำแนะนำตามสเปก"
+        self.spec_label = tk.Label(self, text=spec_text + "  (ขนาด/RAM เป็นค่าประมาณ)",
+                                   bg=BG, fg=MUTED, font=app.f_small, anchor="w")
+        self.spec_label.pack(fill="x", padx=16)
+
+        # หมายเหตุ: widget ขนาดคงที่ (progress_frame/bottom_frame) ต้อง pack ก่อน "body" ที่
+        # expand=True เสมอ — มิฉะนั้นเมื่อย่อหน้าต่างเล็กลง body จะแย่งพื้นที่จนอันอื่นหาย
+        # (บั๊กเดียวกับที่เคยเจอในหน้าต่างหลัก ดู _build_main)
+        self.progress_frame = tk.Frame(self, bg=PANEL)
+        self.progress_label = tk.Label(self.progress_frame, text="", bg=PANEL, fg=TEXT,
+                                       font=app.f_small, anchor="w")
+        self.progress_label.pack(fill="x", padx=12, pady=(8, 2))
+        bar_row = tk.Frame(self.progress_frame, bg=PANEL)
+        bar_row.pack(fill="x", padx=12, pady=(0, 10))
+        self.progress_bar = ttk.Progressbar(bar_row, mode="determinate", maximum=100)
+        self.progress_bar.pack(side="left", fill="x", expand=True)
+        self.cancel_button = app._flat_button(bar_row, "ยกเลิก", self._cancel_pull,
+                                              bg=RED, fg="#3b0d10", activebackground="#ff8b91")
+        self.cancel_button.pack(side="right", padx=(10, 0))
+        # progress_frame จะถูก pack (side="bottom") ก็ต่อเมื่อเริ่มดาวน์โหลด (ดู _start_pull)
+
+        self.bottom_frame = tk.Frame(self, bg=BG)
+        self.bottom_frame.pack(side="bottom", fill="x", padx=16, pady=(0, 14))
+        app._flat_button(self.bottom_frame, "ปิด", self._on_dialog_close).pack(side="right")
+        app._flat_button(self.bottom_frame, "↻ โหลดรายชื่อใหม่", self._reload_catalog,
+                         bg=BG, fg=MUTED, activebackground=BG).pack(side="right", padx=(0, 8))
+
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="both", expand=True, padx=16, pady=8)
+        self.list_text = ScrolledText(body, wrap="word", bg=BG, fg=TEXT, relief="flat",
+                                      borderwidth=0, padx=6, pady=4, font=app.f_ui,
+                                      state="disabled", cursor="arrow")
+        self.list_text.pack(fill="both", expand=True)
+        self._configure_catalog_tags()
+
+    def _configure_catalog_tags(self):
+        lt = self.list_text
+        app = self.app
+        lt.tag_configure("cat_name", foreground=TEXT, font=app.f_ui_bold)
+        lt.tag_configure("cat_cap", foreground=BLUE, font=app.f_small)
+        lt.tag_configure("cat_muted", foreground=MUTED, font=app.f_small)
+        lt.tag_configure("cat_desc", foreground=TEXT, font=app.f_ui, spacing3=6,
+                         lmargin1=2, lmargin2=2)
+        lt.tag_configure("chip_good", foreground="#082b1d", background=GREEN, font=app.f_small)
+        lt.tag_configure("chip_tight", foreground="#3b2f00", background="#f5c94f", font=app.f_small)
+        lt.tag_configure("chip_bad", foreground=TEXT, background="#4a3236", font=app.f_small)
+        lt.tag_configure("chip_neutral", foreground=TEXT, background=PANEL, font=app.f_small)
+
+    # --------------------------------------------------------- catalog --
+    def _reload_catalog(self):
+        self.list_text.configure(state="normal")
+        self.list_text.delete("1.0", "end")
+        self.list_text.insert("1.0", "กำลังโหลดรายชื่อโมเดลจาก ollama.com/library ...", "cat_muted")
+        self.list_text.configure(state="disabled")
+        threading.Thread(target=self._load_catalog, daemon=True).start()
+
+    def _load_catalog(self):
+        try:
+            models = fetch_model_library()
+            models.sort(key=lambda m: -_pulls_to_number(m["pulls"]))
+            self.after(0, lambda: self._on_catalog_loaded(models))
+        except Exception as exc:                                    # noqa: BLE001
+            self.after(0, lambda: self._on_catalog_error(exc))
+
+    def _on_catalog_loaded(self, models: list[dict]):
+        self.models = models
+        self._render_catalog()
+
+    def _on_catalog_error(self, exc: Exception):
+        self.list_text.configure(state="normal")
+        self.list_text.delete("1.0", "end")
+        self.list_text.insert(
+            "end", f"โหลดรายชื่อโมเดลไม่สำเร็จ: {exc}\nตรวจสอบการเชื่อมต่ออินเทอร์เน็ตแล้วลอง "
+                   "“โหลดรายชื่อใหม่” อีกครั้ง", "cat_muted")
+        self.list_text.configure(state="disabled")
+
+    def _render_catalog(self):
+        if not self.models:
+            return
+        query = self.search_var.get().strip().lower()
+        lt = self.list_text
+        lt.configure(state="normal")
+        lt.delete("1.0", "end")
+        shown = 0
+        for model in self.models:
+            haystack = model["name"].lower() + " " + model["description"].lower()
+            if query and query not in haystack:
+                continue
+            shown += 1
+            self._render_model_row(lt, model)
+        if shown == 0:
+            lt.insert("end", "ไม่พบโมเดลที่ตรงกับคำค้นหา\n", "cat_muted")
+        lt.configure(state="disabled")
+
+    def _render_model_row(self, lt, model: dict):
+        lt.insert("end", model["name"], "cat_name")
+        if model["capabilities"]:
+            lt.insert("end", "  " + " ".join(f"#{c}" for c in model["capabilities"]), "cat_cap")
+        if model["pulls"]:
+            lt.insert("end", f"    {model['pulls']} pulls", "cat_muted")
+        lt.insert("end", "\n")
+        if model["description"]:
+            lt.insert("end", model["description"] + "\n", "cat_desc")
+        sizes = model["sizes"] or ["latest"]
+        for tag in sizes:
+            gb = estimate_model_gb(tag) if tag != "latest" else None
+            tier = recommend_tier(gb, self.app.system_ram_gb)
+            label = f" {tag}" + (f" ~{gb:g}GB " if gb is not None else " ")
+            self._insert_chip(lt, label, f"{model['name']}:{tag}" if tag != "latest"
+                              else model["name"], tier)
+            lt.insert("end", " ")
+        lt.insert("end", "\n\n")
+
+    def _insert_chip(self, widget, label: str, model_tag: str, tier: str):
+        count = getattr(widget, "_chip_count", 0)
+        widget._chip_count = count + 1
+        click_tag = f"chip{count}"
+        widget.insert("end", label, (TIER_TAG.get(tier, "chip_neutral"), click_tag))
+        widget.tag_bind(click_tag, "<Button-1>", lambda e, mt=model_tag, t=tier: self._on_chip_click(mt, t))
+        widget.tag_bind(click_tag, "<Enter>", lambda e: widget.configure(cursor="hand2"))
+        widget.tag_bind(click_tag, "<Leave>", lambda e: widget.configure(cursor="arrow"))
+
+    # ---------------------------------------------------------- pulling --
+    def _on_chip_click(self, model_tag: str, tier: str):
+        if self.pulling:
+            self.progress_label.configure(
+                text="กำลังดาวน์โหลดโมเดลอื่นอยู่ กรุณารอให้เสร็จหรือกดยกเลิกก่อน")
+            return
+        note = f"\n\n{TIER_LABEL.get(tier, '')}" if tier in ("tight", "toolarge") else ""
+        if not messagebox.askyesno(
+                "ดาวน์โหลดโมเดล",
+                f"ดาวน์โหลด {model_tag} หรือไม่?\n"
+                f"ขนาด/เวลาที่ใช้ขึ้นอยู่กับความเร็วอินเทอร์เน็ตและสเปกเครื่อง{note}",
+                parent=self):
+            return
+        self._start_pull(model_tag)
+
+    def _start_pull(self, model_tag: str):
+        self.pulling = True
+        self.cancel_event = threading.Event()
+        # side="bottom" + before=bottom_frame: เกาะอยู่เหนือแถวปุ่มปิด/โหลดใหม่เสมอ
+        # ไม่แย่งพื้นที่ list_text (expand=True) เพราะ body ถูก pack ไว้ท้ายสุดแล้ว
+        self.progress_frame.pack(side="bottom", fill="x", padx=16, pady=(0, 12),
+                                 before=self.bottom_frame)
+        self.progress_bar.configure(value=0)
+        self.progress_label.configure(text=f"กำลังเริ่มดาวน์โหลด {model_tag} ...")
+        threading.Thread(target=self._pull_worker, args=(model_tag, self.cancel_event),
+                         daemon=True).start()
+        self.after(150, self._poll_pull)
+
+    def _pull_worker(self, model_tag: str, cancel_event: threading.Event):
+        try:
+            for obj in self.app.client.pull_model(model_tag):
+                if cancel_event.is_set():
+                    self.pull_queue.put(("cancelled", model_tag))
+                    return
+                self.pull_queue.put(("progress", obj))
+            self.pull_queue.put(("done", model_tag))
+        except Exception as exc:                                    # noqa: BLE001
+            if cancel_event.is_set():
+                self.pull_queue.put(("cancelled", model_tag))
+            else:
+                self.pull_queue.put(("error", str(exc)))
+
+    def _poll_pull(self):
+        try:
+            while True:
+                kind, payload = self.pull_queue.get_nowait()
+                if kind == "progress":
+                    self._show_progress(payload)
+                elif kind == "done":
+                    self._finish_pull(f"ดาวน์โหลด {payload} สำเร็จ", ok=True)
+                    return
+                elif kind == "cancelled":
+                    self._finish_pull(f"ยกเลิกการดาวน์โหลด {payload} แล้ว", ok=False)
+                    return
+                elif kind == "error":
+                    self._finish_pull(f"ดาวน์โหลดล้มเหลว: {payload}", ok=False)
+                    return
+        except queue.Empty:
+            pass
+        if self.pulling:
+            self.after(150, self._poll_pull)
+
+    def _show_progress(self, obj: dict):
+        status = obj.get("status", "")
+        total = obj.get("total") or 0
+        completed = obj.get("completed") or 0
+        if total:
+            pct = completed / total * 100
+            self.progress_bar.configure(value=pct)
+            self.progress_label.configure(
+                text=f"{status} — {completed / 1e9:.2f} / {total / 1e9:.2f} GB ({pct:.0f}%)")
+        else:
+            self.progress_label.configure(text=status)
+
+    def _finish_pull(self, message: str, ok: bool):
+        self.pulling = False
+        self.progress_label.configure(text=message, fg=(GREEN if ok else RED))
+        if ok:
+            self.progress_bar.configure(value=100)
+            threading.Thread(target=self.app._refresh_models, daemon=True).start()
+
+    def _cancel_pull(self):
+        if not self.pulling or self.cancel_event is None:
+            return
+        self.cancel_event.set()
+        self.progress_label.configure(text="กำลังยกเลิก...")
+        threading.Thread(target=self.app.client.cancel_pull, daemon=True).start()
 
 
 def main():

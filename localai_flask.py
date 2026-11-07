@@ -21,7 +21,7 @@ Local AI Chat • Ollama — Flask single-file edition
 ติดตั้ง:  pip install flask
           pip install openpyxl python-docx python-pptx pypdf   (สำหรับอ่านเอกสาร; xls ใช้ xlrd)
 รัน:      python localai_flask.py
-          เครื่องนี้เปิด http://127.0.0.1:5000  •  เครื่องอื่นในวง LAN เปิด http://<IP เครื่องนี้>:5000
+          เครื่องนี้เปิด http://127.0.0.1:5050  •  เครื่องอื่นในวง LAN เปิด http://<IP เครื่องนี้>:5050
           (โปรแกรมจะพิมพ์ URL ให้ตอนเริ่ม; Ollama ยังรันอยู่บนเครื่องที่รัน Flask เครื่องเดียว)
 """
 
@@ -428,7 +428,20 @@ body.no-side #sidebar{display:none}
 .code-head button{background:none;border:0;color:var(--muted);font-size:12.5px}
 .code-head button:hover{color:var(--text)}
 .code pre{margin:0;padding:12px 14px;overflow-x:auto}
-.code pre code{background:none;padding:0;color:#e6e6e6;font-size:13.5px;white-space:pre}
+.code pre code{background:none;padding:0;color:#d4d4d4;font-size:13.5px;white-space:pre}
+/* สีโค้ด (โทน VS Code Dark+) */
+.tk-k{color:#c586c0}            /* keyword ควบคุม */
+.tk-l{color:#569cd6}            /* true/false/null/self, G-code G */
+.tk-t{color:#4ec9b0}            /* type / builtin */
+.tk-f{color:#dcdcaa}            /* function call */
+.tk-s{color:#ce9178}            /* string, F/S/T ใน G-code */
+.tk-n{color:#b5cea8}            /* number */
+.tk-c{color:#6a9955;font-style:italic}  /* comment */
+.tk-p{color:#9cdcfe}            /* property / key / แกน XYZ */
+.tk-d{color:#dcdcaa}            /* decorator / preprocessor */
+.tk-v{color:#4fc1ff}            /* $variable */
+.tk-m{color:#d16969}            /* M-code */
+.tk-x{color:#808080}            /* N line number */
 details.thought{margin:0 0 8px}
 details.thought summary{color:var(--muted);font-size:13px;cursor:pointer;user-select:none}
 details.thought .tbody{background:var(--thought-bg);color:var(--thought-fg);font-size:13px;padding:8px 12px;border-radius:8px;margin-top:6px;white-space:pre-wrap}
@@ -630,6 +643,133 @@ function deleteChat(id){
   ensureChat(); save(); renderAll();
 }
 
+// ------------------------------------------------------------ syntax highlight
+// ตัวไฮไลต์ขนาดเล็กในตัว (ไม่ใช้ CDN → ใช้งานออฟไลน์ใน LAN ได้)
+// หลักการ: รวม regex ของแต่ละภาษาเป็นตัวเดียว สแกนครั้งเดียว แล้วจัดชนิด token จาก group ที่ match
+const HL = (() => {
+  const set = s => new Set(s.split(/\s+/).filter(Boolean));
+  const P = {
+    slash: String.raw`\/\/.*|\/\*[\s\S]*?(?:\*\/|$)`,
+    block: String.raw`\/\*[\s\S]*?(?:\*\/|$)`,
+    hash:  String.raw`#.*`,
+    dash:  String.raw`--.*`,
+    dq:    String.raw`"(?:\\.|[^"\\\n])*"?`,
+    sq:    String.raw`'(?:\\.|[^'\\\n])*'?`,
+    bt:    String.raw`\x60(?:\\.|[^\x60\\])*\x60?`,
+    num:   String.raw`\b(?:0[xX][\da-fA-F_]+|0[bB][01_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)[a-zA-Z]*\b|\B\.\d+\b`,
+    id:    String.raw`[A-Za-z_$][\w$]*`,
+  };
+  const C_KW = "if else for while do switch case default break continue return goto try catch finally throw "
+    + "new delete class struct union enum typedef namespace using template typename public private protected "
+    + "virtual override static const constexpr volatile extern inline sizeof import package extends implements "
+    + "interface abstract final synchronized throws instanceof func fn let mut impl trait pub use mod match "
+    + "where loop go defer select chan range type var async await yield lock foreach in is as out ref";
+  const C_TYPES = "int long short char float double bool boolean void auto signed unsigned size_t uint8_t "
+    + "uint16_t uint32_t uint64_t int8_t int16_t int32_t int64_t string String byte str usize isize i32 i64 u8 "
+    + "u32 u64 f32 f64 Vec Option Result List Map Object var std vector cout cin endl printf Serial";
+  const GC_EXTRA = [
+    [String.raw`\([^)\n]*\)?|;.*`, "c"],
+    [String.raw`(?<![A-Za-z])[Nn]\d+`, "x"],
+    [String.raw`(?<![A-Za-z])[Gg]\d+(?:\.\d+)?`, "l"],
+    [String.raw`(?<![A-Za-z])[Mm]\d+`, "m"],
+    [String.raw`(?<![A-Za-z])[OoTt]\d+`, "t"],
+    [String.raw`(?<![A-Za-z])[XYZABCUVWIJKRxyzabcuvwijkr][+-]?(?:\d+\.?\d*|\.\d+)`, "p"],
+    [String.raw`(?<![A-Za-z])[FSHDPQLEfshdpqle][+-]?(?:\d+\.?\d*|\.\d+)`, "s"],
+    [String.raw`#\d+`, "v"],
+  ];
+  const L = {
+    python: {c:P.hash, s:String.raw`[rRbBfFuU]{0,2}(?:"{3}[\s\S]*?(?:"{3}|$)|'{3}[\s\S]*?(?:'{3}|$)|${P.dq}|${P.sq})`,
+      x:[[String.raw`@[\w.]+`, "d"]],
+      k:set("and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case"),
+      l:set("True False None self cls"),
+      t:set("print len range int float str list dict set tuple bytes bool open enumerate zip map filter sum min max abs round isinstance super type sorted reversed any all object Exception ValueError TypeError KeyError np pd plt")},
+    js: {c:P.slash, s:`${P.dq}|${P.sq}|${P.bt}`,
+      k:set("break case catch class const continue debugger default delete do else export extends finally for function if import in instanceof let new of return super switch throw try typeof var void while with yield async await static get set from as interface type enum implements private public protected readonly declare"),
+      l:set("true false null undefined NaN Infinity this"),
+      t:set("console Math JSON Object Array String Number Boolean Promise Date Map Set Error RegExp document window fetch require module process")},
+    json: {c:"", s:P.dq, x:[[String.raw`"(?:\\.|[^"\\\n])*"(?=\s*:)`, "p"]], l:set("true false null")},
+    c: {c:P.slash, s:`${P.dq}|${P.sq}`, x:[[String.raw`(?<=^|\n)[ \t]*#[ \t]*\w+(?:[ \t]*<[^>\n]*>)?`, "d"]],
+      k:set(C_KW), l:set("true false null nullptr NULL this self None"), t:set(C_TYPES)},
+    bash: {c:P.hash, s:`${P.dq}|${P.sq}`, x:[[String.raw`\$\{?[\w@#?*!-]+\}?`, "v"]],
+      k:set("if then else elif fi for while until do done case esac in function return export local exit set unset source alias"),
+      t:set("echo cd ls cp mv rm mkdir cat grep sed awk sudo apt pip python python3 git curl chmod chown")},
+    powershell: {c:P.hash, s:`${P.dq}|${P.sq}`, x:[[String.raw`\$[\w:]+`, "v"], [String.raw`\b[A-Z][a-z]+-[A-Z]\w+`, "f"]],
+      k:set("if else elseif foreach for while do switch function return param begin process end try catch finally throw in")},
+    sql: {c:`${P.dash}|${P.block}`, s:`${P.sq}|${P.dq}`, ci:true,
+      k:set("select from where and or not insert into values update set delete create table drop alter add join left right inner outer full cross on group by order having limit offset as distinct union all is in like between case when then else end primary key foreign references index view exists asc desc with returning default"),
+      l:set("null true false"), t:set("count sum avg min max coalesce cast now int integer varchar text date datetime timestamp real numeric")},
+    html: {c:"", s:`${P.dq}|${P.sq}`, nonum:true,
+      x:[[String.raw`<!--[\s\S]*?(?:-->|$)`, "c"], [String.raw`<\/?[\w:-]+|\/?>`, "l"], [String.raw`[\w:-]+(?==)`, "p"]]},
+    css: {c:P.block, s:`${P.dq}|${P.sq}`,
+      x:[[String.raw`@[\w-]+`, "k"], [String.raw`#[\da-fA-F]{3,8}\b`, "n"], [String.raw`[\w-]+(?=\s*:[^:{]*[;}\n])`, "p"]]},
+    gcode: {c:"", s:"", nonum:true, ci:true, x:GC_EXTRA,
+      k:set("IF THEN GOTO WHILE DO END EQ NE GT GE LT LE AND OR")},
+    tnc: {c:"", s:`${P.dq}`, ci:false, x:[[String.raw`;.*`, "c"], [String.raw`^\s*\d+(?=\s)`, "x"], ...GC_EXTRA.slice(3)],
+      k:set("BEGIN END PGM MM INCH BLK FORM TOOL CALL DEF CYCL LBL REP FN STOP FMAX FAUTO FZ CC CR CT CP RND CHF APPR DEP LCT LN LT RL RR DR DL"),
+      l:set("L C Q QR QL")},
+    plain: {c:"", s:`${P.dq}|${P.sq}`},
+  };
+  const ALIAS = {py:"python", python3:"python", javascript:"js", jsx:"js", ts:"js", typescript:"js", tsx:"js",
+    node:"js", cpp:"c", "c++":"c", cc:"c", h:"c", hpp:"c", java:"c", cs:"c", csharp:"c", go:"c", golang:"c",
+    rust:"c", rs:"c", kotlin:"c", kt:"c", swift:"c", dart:"c", arduino:"c", ino:"c", php:"c", scala:"c",
+    sh:"bash", shell:"bash", zsh:"bash", console:"bash", bat:"bash", cmd:"bash", ps1:"powershell", ps:"powershell",
+    pwsh:"powershell", mysql:"sql", postgres:"sql", postgresql:"sql", sqlite:"sql", xml:"html", svg:"html",
+    vue:"html", htm:"html", scss:"css", less:"css", nc:"gcode", cnc:"gcode", gc:"gcode", ngc:"gcode", tap:"gcode",
+    fanuc:"gcode", heidenhain:"tnc", klartext:"tnc", jsonc:"json", yaml:"bash", yml:"bash", toml:"bash", ini:"bash",
+    text:"plain", txt:"plain", md:"plain", markdown:"plain"};
+
+  function guess(code){
+    if (/^\s*(BEGIN PGM|\d+\s+(TOOL CALL|BLK FORM|L [XYZ]|CYCL DEF))/m.test(code)) return "tnc";
+    if ((code.match(/^\s*(N\d+\s*)?[GM]\d+/gim) || []).length >= 2 || /^%\s*$|^O\d{3,}/m.test(code)) return "gcode";
+    if (/^\s*(def |class \w+.*:|from [\w.]+ import|import \w+\s*$)/m.test(code)) return "python";
+    if (/^\s*#include|\bint\s+main\s*\(|\bstd::|\bpublic\s+(static\s+)?(void|class)/m.test(code)) return "c";
+    if (/^\s*[{\[]/.test(code)) { try { JSON.parse(code); return "json"; } catch {} }
+    if (/^\s*</.test(code)) return "html";
+    if (/^\s*(SELECT|INSERT|UPDATE|CREATE|DELETE|WITH)\b/i.test(code)) return "sql";
+    if (/\b(function|const|let)\b|=>|console\./.test(code)) return "js";
+    if (/^(#!\/bin|\$ |sudo |pip |apt |cd )/m.test(code)) return "bash";
+    return "plain";
+  }
+
+  const NOFN = set("plain gcode tnc html json css");
+  const cache = {};
+  function compile(name){
+    if (cache[name]) return cache[name];
+    const d = L[name], parts = [], kinds = [];
+    for (const [re, k] of d.x || []) { parts.push(re); kinds.push(k); }
+    if (d.c) { parts.push(d.c); kinds.push("c"); }
+    if (d.s) { parts.push(d.s); kinds.push("s"); }
+    if (!d.nonum) { parts.push(P.num); kinds.push("n"); }
+    parts.push(P.id); kinds.push("id");
+    return cache[name] = {d, kinds, re:new RegExp(parts.map(p => `(${p})`).join("|"), "g" + (name === "tnc" ? "m" : ""))};
+  }
+
+  function highlight(code, lang){
+    let name = (lang || "").toLowerCase();
+    name = L[name] ? name : ALIAS[name] || (name ? "plain" : guess(code));
+    if (code.length > 150000) return {html:esc(code), name};       // ยาวมาก ไม่ไฮไลต์ กันหน้าเว็บหน่วง
+    const {d, kinds, re} = compile(name);
+    let out = "", last = 0, m;
+    re.lastIndex = 0;
+    while ((m = re.exec(code))) {
+      if (!m[0]) { re.lastIndex++; continue; }
+      out += esc(code.slice(last, m.index));
+      let k = kinds[m.slice(1).findIndex(g => g !== undefined)];
+      const w = m[0];
+      if (k === "id") {
+        const key = d.ci ? w.toUpperCase() : w, low = w.toLowerCase();
+        const has = s => s && (s.has(key) || (d.ci && s.has(low)));
+        k = has(d.k) ? "k" : has(d.l) ? "l" : has(d.t) ? "t"
+          : /^\s*\(/.test(code.slice(re.lastIndex, re.lastIndex + 40)) && !NOFN.has(name) ? "f" : "";
+      }
+      out += k ? `<span class="tk-${k}">${esc(w)}</span>` : esc(w);
+      last = re.lastIndex;
+    }
+    return {html: out + esc(code.slice(last)), name};
+  }
+  return {highlight};
+})();
+
 // ------------------------------------------------------------ markdown
 function inline(text){
   return esc(text).split(/(`[^`\n]+`)/).map(p => {
@@ -643,8 +783,13 @@ function inline(text){
 function markdown(text){
   const out = []; let inCode = false, code = [], lang = "", list = null;
   const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
-  const flush = () => out.push(`<div class="code"><div class="code-head"><span>${esc(lang || "code")}</span>`
-    + `<button data-act="ccopy">⧉ คัดลอกโค้ด</button></div><pre><code>${esc(code.join("\n"))}</code></pre></div>`);
+  const LABEL = {python:"python", js:"javascript", json:"json", c:"c / c++", bash:"shell", powershell:"powershell",
+                 sql:"sql", html:"html / xml", css:"css", gcode:"g-code", tnc:"heidenhain", plain:"code"};
+  const flush = () => {
+    const h = HL.highlight(code.join("\n"), lang);
+    out.push(`<div class="code"><div class="code-head"><span>${esc(lang || LABEL[h.name] || "code")}</span>`
+      + `<button data-act="ccopy">⧉ คัดลอกโค้ด</button></div><pre><code>${h.html}</code></pre></div>`);
+  };
   for (const line of text.split("\n")) {
     const f = line.match(/^\s*```\s*([\w.+-]*)/);
     if (f) { if (inCode) { flush(); code = []; inCode = false; } else { closeList(); inCode = true; lang = f[1]; } continue; }

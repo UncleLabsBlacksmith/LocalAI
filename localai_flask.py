@@ -20,7 +20,9 @@ Local AI Chat • Ollama — Flask single-file edition
 
 ติดตั้ง:  pip install flask
           pip install openpyxl python-docx python-pptx pypdf   (สำหรับอ่านเอกสาร; xls ใช้ xlrd)
-รัน:      python localai_flask.py   แล้วเปิด http://127.0.0.1:5000
+รัน:      python localai_flask.py
+          เครื่องนี้เปิด http://127.0.0.1:5000  •  เครื่องอื่นในวง LAN เปิด http://<IP เครื่องนี้>:5000
+          (โปรแกรมจะพิมพ์ URL ให้ตอนเริ่ม; Ollama ยังรันอยู่บนเครื่องที่รัน Flask เครื่องเดียว)
 """
 
 import csv
@@ -28,6 +30,7 @@ import io
 import json
 import os
 import re
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -37,7 +40,8 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 
 APP_TITLE = "Local AI Chat • Ollama"
 DATA_FILE = Path(os.environ.get("LOCALAI_DATA") or Path.home() / ".local_ai_ollama_chat.json")
-LISTEN_HOST = os.environ.get("LOCALAI_HOST", "127.0.0.1")
+# 0.0.0.0 = รับการเชื่อมต่อจากทุกเครื่องในวง LAN  (ตั้ง LOCALAI_HOST=127.0.0.1 เพื่อเปิดเฉพาะเครื่องนี้)
+LISTEN_HOST = os.environ.get("LOCALAI_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("LOCALAI_PORT", "5000"))
 
 DEFAULTS = {
@@ -1072,8 +1076,30 @@ window.addEventListener("beforeunload", () => {
 """
 
 
+def lan_ips():
+    """หา IP ของเครื่องนี้ในวง LAN (ไว้บอกว่าเครื่องอื่นต้องเปิด URL ไหน)"""
+    ips = set()
+    try:  # วิธีนี้ไม่ได้ส่งข้อมูลออกไปจริง แค่ให้ OS เลือก interface ที่ใช้ออกเน็ต
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    return sorted(ip for ip in ips if not ip.startswith("127."))
+
+
 def main():
-    print(f"{APP_TITLE}\n  เปิดเบราว์เซอร์ที่ http://{LISTEN_HOST}:{LISTEN_PORT}\n  ข้อมูลแชต: {DATA_FILE}")
+    print(f"{APP_TITLE}\n  ข้อมูลแชต: {DATA_FILE}")
+    print(f"  เครื่องนี้:      http://127.0.0.1:{LISTEN_PORT}")
+    if LISTEN_HOST in ("0.0.0.0", "::"):
+        for ip in lan_ips():
+            print(f"  เครื่องอื่นในวง: http://{ip}:{LISTEN_PORT}")
+        print("  ⚠ ไม่มีระบบล็อกอิน — ทุกเครื่องในวง LAN เห็นและแก้ประวัติแชตเดียวกันได้\n"
+              "    ถ้าต้องการเปิดเฉพาะเครื่องนี้ ให้ตั้ง LOCALAI_HOST=127.0.0.1")
     app.run(host=LISTEN_HOST, port=LISTEN_PORT, threaded=True, debug=False)
 
 

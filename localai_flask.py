@@ -42,7 +42,7 @@ APP_TITLE = "Local AI Chat • Ollama"
 DATA_FILE = Path(os.environ.get("LOCALAI_DATA") or Path.home() / ".local_ai_ollama_chat.json")
 # 0.0.0.0 = รับการเชื่อมต่อจากทุกเครื่องในวง LAN  (ตั้ง LOCALAI_HOST=127.0.0.1 เพื่อเปิดเฉพาะเครื่องนี้)
 LISTEN_HOST = os.environ.get("LOCALAI_HOST", "0.0.0.0")
-LISTEN_PORT = int(os.environ.get("LOCALAI_PORT", "5000"))
+LISTEN_PORT = int(os.environ.get("LOCALAI_PORT", "5050"))
 
 DEFAULTS = {
     "host": "http://localhost:11434", "model": "", "systemPrompt": "",
@@ -483,7 +483,30 @@ dialog .check input{accent-color:var(--accent);width:16px;height:16px}
 dialog .note{color:#c6c9cb;font-size:12.5px;margin-top:12px;word-break:break-all}
 dialog .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
 #hostErr{color:var(--red);font-size:12.5px;display:none}
-@media (max-width:760px){#sidebar{position:fixed;z-index:5;height:100%}#messages{padding:16px 12px}}
+/* จอแคบ (มือถือ/แท็บเล็ตแนวตั้ง): แถบข้างเป็นลิ้นชักเลื่อนออก ซ่อนไว้ก่อน กด ☰ เพื่อเปิด */
+#backdrop{display:none}
+@media (max-width:860px){
+  html,body{height:100dvh}
+  #sidebar,body.no-side #sidebar{display:flex;position:fixed;top:0;left:0;bottom:0;z-index:30;width:min(300px,85vw);
+    transform:translateX(-100%);transition:transform .22s ease;box-shadow:none}
+  body.side-open #sidebar{transform:none;box-shadow:4px 0 24px rgba(0,0,0,.5)}
+  body.side-open #backdrop{display:block;position:fixed;inset:0;z-index:25;background:rgba(0,0,0,.5)}
+  .top{height:52px;padding:0 10px 0 6px;gap:6px}
+  #title{font-size:15px}
+  .top .btn.small{padding:5px 8px;font-size:12.5px}
+  #messages{padding:14px 12px}
+  .composer-wrap{padding:8px 10px 10px}
+  #prompt{font-size:16px}               /* กัน iOS ซูมหน้าจอเมื่อแตะช่องพิมพ์ */
+  #send{min-width:64px;padding:8px 10px}
+  #status{font-size:11.5px}
+  .att img{max-width:150px;max-height:130px}
+  #history li .ops{display:flex}        /* จอสัมผัสไม่มี hover → แสดงปุ่มตลอด */
+}
+@media (max-width:420px){
+  #regen,#export{font-size:0;padding:6px 9px}
+  #regen::before{content:"↻";font-size:15px}
+  #export::before{content:"↓";font-size:15px}
+}
 </style>
 </head>
 <body>
@@ -502,6 +525,7 @@ dialog .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
   </div>
 </aside>
 
+<div id="backdrop"></div>
 <main id="main">
   <div class="top">
     <button class="menu" id="toggleSide" title="ซ่อน/แสดงแถบข้าง">☰</button>
@@ -1030,7 +1054,14 @@ $("refresh").onclick = refreshModels;
 $("search").oninput = renderHistory;
 $("model").onchange = e => { S.settings.model = e.target.value; save(); };
 $("openSettings").onclick = openSettings;
-$("toggleSide").onclick = () => document.body.classList.toggle("no-side");
+// จอกว้าง: ☰ ซ่อน/แสดงแถบข้าง  •  จอแคบ: ☰ เปิดลิ้นชัก แตะพื้นหลังหรือเลือกแชตเพื่อปิด
+const narrow = matchMedia("(max-width:860px)");
+const closeDrawer = () => document.body.classList.remove("side-open");
+$("toggleSide").onclick = () => document.body.classList.toggle(narrow.matches ? "side-open" : "no-side");
+$("backdrop").onclick = closeDrawer;
+narrow.addEventListener("change", closeDrawer);
+$("history").addEventListener("click", e => { if (narrow.matches && !e.target.dataset.op) closeDrawer(); });
+$("newChat").addEventListener("click", () => { if (narrow.matches) closeDrawer(); });
 $("regen").onclick = () => sendMessage(true);
 $("export").onclick = () => exportMd();
 $("send").onclick = () => sendMessage(false);
@@ -1055,6 +1086,7 @@ $("prompt").addEventListener("keydown", e => {
 });
 document.addEventListener("keydown", e => {
   if (e.key === "Escape" && $("viewer").style.display === "flex") { $("viewer").style.display = "none"; return; }
+  if (e.key === "Escape" && document.body.classList.contains("side-open")) { closeDrawer(); return; }
   if (e.key === "Escape" && active && !$("settings").open) stop();
   if (e.altKey && (e.key === "n" || e.key === "N")) { e.preventDefault(); newChat(); }
 });

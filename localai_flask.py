@@ -13,11 +13,18 @@ Local AI Chat • Ollama — Flask single-file edition
   • โหมด Thinking (field "thinking" และแท็ก <think>…</think>) แบบพับ/ขยายได้
   • ตอบใหม่, ส่งออก .md, คัดลอกคำตอบ/โค้ด, แสดง tokens และ tok/s
   • คีย์ลัด: Enter ส่ง • Shift+Enter ขึ้นบรรทัด • Esc หยุด • Alt+N แชตใหม่
+  • แนบไฟล์ (ปุ่ม 📎 / ลากวาง / Ctrl+V วางรูป):
+      - รูปภาพ → ส่งให้โมเดล vision (เช่น qwen2.5vl, llava, gemma3, llama3.2-vision)
+      - เอกสาร → แปลงเป็นข้อความให้ AI วิเคราะห์: xlsx/xlsm, xls, csv/tsv, docx, pptx, pdf,
+        txt/md/json/โค้ด/G-code
 
 ติดตั้ง:  pip install flask
-รัน:      python LocalAI_flask.py   แล้วเปิด http://127.0.0.1:5000
+          pip install openpyxl python-docx python-pptx pypdf   (สำหรับอ่านเอกสาร; xls ใช้ xlrd)
+รัน:      python localai_flask.py   แล้วเปิด http://127.0.0.1:5000
 """
 
+import csv
+import io
 import json
 import os
 import re
@@ -40,7 +47,141 @@ DEFAULTS = {
 # อนุญาตเฉพาะ Ollama ในเครื่อง (กัน server ถูกใช้ยิงไปที่อื่น)
 HOST_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", re.I)
 
+MAX_UPLOAD_MB = 30          # ขนาดไฟล์แนบสูงสุดต่อไฟล์
+MAX_DOC_CHARS = 120_000     # ตัดข้อความที่ดึงจากเอกสารไม่ให้เกินนี้ (กัน context ล้น)
+MAX_SHEET_ROWS = 3000       # จำนวนแถวสูงสุดต่อชีต
+
+TEXT_EXT = {".txt", ".md", ".json", ".xml", ".html", ".htm", ".log", ".ini", ".cfg", ".yaml",
+            ".yml", ".toml", ".py", ".js", ".ts", ".c", ".cpp", ".h", ".java", ".cs", ".sql",
+            ".nc", ".gcode", ".tap", ".css", ".sh", ".bat"}
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
+
+
+# ------------------------------------------------------------ document → text
+def _need(module, pip_name):
+    try:
+        return __import__(module)
+    except ImportError:
+        raise RuntimeError(f"ต้องติดตั้งไลบรารีเพิ่มก่อน:  pip install {pip_name}")
+
+
+def _cell(v):
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        return f"{v:.10g}"
+    if hasattr(v, "isoformat"):
+        if hasattr(v, "hour") and hasattr(v, "date") and (v.hour, v.minute, v.second) == (0, 0, 0):
+            return v.date().isoformat()      # วันที่ล้วนใน Excel ไม่ต้องมี 00:00:00
+        return v.isoformat(sep=" ") if hasattr(v, "date") else v.isoformat()
+    return str(v)
+
+
+def _rows_to_csv(rows):
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    n = 0
+    for row in rows:
+        cells = [_cell(v) for v in row]
+        while cells and cells[-1] == "":
+            cells.pop()
+        if not cells:
+            continue
+        w.writerow(cells)
+        n += 1
+        if n >= MAX_SHEET_ROWS:
+            buf.write(f"... (ตัดเหลือ {MAX_SHEET_ROWS} แถวแรก)\n")
+            break
+        if buf.tell() > MAX_DOC_CHARS:
+            break
+    return buf.getvalue()
+
+
+def extract_xlsx(data):
+    openpyxl = _need("openpyxl", "openpyxl")
+    # data_only=True → ได้ค่าที่คำนวณแล้วของสูตร (ค่าที่ Excel บันทึกไว้ล่าสุด)
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    parts = []
+    for ws in wb.worksheets:
+        dim = ws.calculate_dimension() if hasattr(ws, "calculate_dimension") else ""
+        parts.append(f"### ชีต: {ws.title}" + (f"  (ช่วง {dim})" if dim else "")
+                     + "\n" + _rows_to_csv(ws.iter_rows(values_only=True)))
+    wb.close()
+    return "\n".join(parts)
+
+
+def extract_xls(data):
+    xlrd = _need("xlrd", "xlrd")
+    book = xlrd.open_workbook(file_contents=data)
+    return "\n".join(f"### ชีต: {sh.name}\n" + _rows_to_csv(sh.row_values(r) for r in range(sh.nrows))
+                     for sh in book.sheets())
+
+
+def extract_docx(data):
+    docx = _need("docx", "python-docx")
+    d = docx.Document(io.BytesIO(data))
+    out = [p.text for p in d.paragraphs if p.text.strip()]
+    for i, t in enumerate(d.tables, 1):
+        out.append(f"\n### ตารางที่ {i}")
+        out.append(_rows_to_csv([c.text for c in r.cells] for r in t.rows))
+    return "\n".join(out)
+
+
+def extract_pptx(data):
+    pptx = _need("pptx", "python-pptx")
+    prs = pptx.Presentation(io.BytesIO(data))
+    out = []
+    for i, slide in enumerate(prs.slides, 1):
+        texts = [sh.text_frame.text for sh in slide.shapes
+                 if getattr(sh, "has_text_frame", False) and sh.text_frame.text.strip()]
+        out.append(f"### สไลด์ {i}\n" + "\n".join(texts))
+    return "\n".join(out)
+
+
+def extract_pdf(data):
+    pypdf = _need("pypdf", "pypdf")
+    reader = pypdf.PdfReader(io.BytesIO(data))
+    out = []
+    for i, page in enumerate(reader.pages, 1):
+        out.append(f"### หน้า {i}\n" + (page.extract_text() or ""))
+        if sum(map(len, out)) > MAX_DOC_CHARS:
+            break
+    text = "\n".join(out)
+    if len(text.strip()) < 20 * max(1, len(reader.pages)) // 4:
+        text += "\n(หมายเหตุ: PDF นี้แทบไม่มีข้อความ อาจเป็นไฟล์สแกน ลองแปลงหน้าเป็นรูปแล้วแนบแทน)"
+    return text
+
+
+def decode_text(data):
+    for enc in ("utf-8-sig", "cp874", "latin-1"):   # cp874 = ภาษาไทยของ Windows
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", "replace")
+
+
+def extract_text(filename, data):
+    ext = os.path.splitext(filename.lower())[1]
+    if ext in (".xlsx", ".xlsm"):
+        return extract_xlsx(data)
+    if ext == ".xls":
+        return extract_xls(data)
+    if ext == ".docx":
+        return extract_docx(data)
+    if ext == ".pptx":
+        return extract_pptx(data)
+    if ext == ".pdf":
+        return extract_pdf(data)
+    if ext in (".csv", ".tsv"):
+        text = decode_text(data)
+        delim = "\t" if ext == ".tsv" else ","
+        return _rows_to_csv(csv.reader(io.StringIO(text), delimiter=delim))
+    if ext in TEXT_EXT or b"\x00" not in data[:4096]:
+        return decode_text(data)
+    raise RuntimeError(f"ยังไม่รองรับไฟล์ชนิด {ext or 'นี้'}")
 
 
 # ------------------------------------------------------------ data
@@ -124,6 +265,28 @@ def models():
         return jsonify(models=[x.get("name") for x in data.get("models", []) if x.get("name")])
     except Exception as e:
         return jsonify(error=str(e)), 502
+
+
+@app.post("/api/extract")
+def extract():
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify(error="ไม่พบไฟล์"), 400
+    try:
+        text = extract_text(f.filename, f.read()).strip()
+    except Exception as e:
+        return jsonify(error=f"อ่านไฟล์ {f.filename} ไม่ได้: {e}"), 422
+    if not text:
+        return jsonify(error=f"ไม่พบข้อความในไฟล์ {f.filename}"), 422
+    truncated = len(text) > MAX_DOC_CHARS
+    if truncated:
+        text = text[:MAX_DOC_CHARS] + f"\n... (ตัดเหลือ {MAX_DOC_CHARS:,} ตัวอักษรแรก)"
+    return jsonify(name=f.filename, text=text, chars=len(text), truncated=truncated)
+
+
+@app.errorhandler(413)
+def too_large(_e):
+    return jsonify(error=f"ไฟล์ใหญ่เกิน {MAX_UPLOAD_MB} MB"), 413
 
 
 @app.post("/api/chat")
@@ -280,6 +443,29 @@ details.thought .tbody{background:var(--thought-bg);color:var(--thought-fg);font
 #prompt::placeholder{color:#7d7f84}
 #send{margin-bottom:5px;min-width:84px}
 #status{text-align:center;color:var(--muted);font-size:12.5px;margin-top:7px}
+#status.warn{color:#f1c27d}
+.composer{flex-wrap:wrap}
+#attach{background:none;border:0;font-size:20px;color:var(--muted);padding:6px 8px;margin-bottom:6px;border-radius:8px}
+#attach:hover{color:var(--text);background:var(--panel-hover)}
+#chips{flex-basis:100%;display:flex;flex-wrap:wrap;gap:8px;padding:8px 6px 0}
+#chips:empty{display:none}
+.chip{display:flex;align-items:center;gap:8px;background:var(--field);border:1px solid var(--border);border-radius:10px;
+  padding:5px 8px;font-size:13px;max-width:260px}
+.chip img{width:42px;height:42px;object-fit:cover;border-radius:6px}
+.chip .ico{font-size:22px}
+.chip .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip .sz{color:var(--muted);font-size:11.5px}
+.chip.err{border-color:var(--red)}.chip.err .sz{color:var(--red)}
+.chip .rm{background:none;border:0;color:var(--muted);font-size:15px;padding:0 2px}
+.chip .rm:hover{color:var(--red)}
+.composer.drag{border-color:var(--accent);border-style:dashed}
+.att{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px}
+.att img{max-width:220px;max-height:180px;border-radius:8px;cursor:zoom-in;border:1px solid var(--line)}
+.att details{background:var(--field);border:1px solid var(--border);border-radius:10px;padding:6px 10px;font-size:13px;max-width:100%}
+.att summary{cursor:pointer}
+.att pre{max-height:300px;overflow:auto;font-family:var(--mono);font-size:12px;white-space:pre-wrap;margin:6px 0 0;color:var(--thought-fg)}
+#viewer{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:20;cursor:zoom-out}
+#viewer img{max-width:94vw;max-height:94vh}
 
 /* settings */
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:18px 22px;width:min(520px,92vw)}
@@ -321,13 +507,19 @@ dialog .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
   </div>
   <div id="messages"><div class="inner" id="list"></div></div>
   <div class="composer-wrap">
-    <div class="composer">
-      <textarea id="prompt" rows="2" placeholder="ถามอะไรก็ได้... (Enter เพื่อส่ง)"></textarea>
+    <div class="composer" id="composer">
+      <div id="chips"></div>
+      <button id="attach" title="แนบรูปภาพหรือเอกสาร (xlsx, csv, docx, pdf, pptx, txt...) — ลากวางหรือวางรูป (Ctrl+V) ได้">📎</button>
+      <input type="file" id="fileInput" multiple hidden
+        accept="image/*,.xlsx,.xlsm,.xls,.csv,.tsv,.docx,.pptx,.pdf,.txt,.md,.json,.xml,.html,.log,.yaml,.yml,.py,.js,.sql,.nc,.gcode,.tap">
+      <textarea id="prompt" rows="2" placeholder="ถามอะไรก็ได้... (Enter เพื่อส่ง • แนบไฟล์ด้วย 📎)"></textarea>
       <button class="btn accent" id="send">ส่ง ↑</button>
     </div>
     <div id="status">Enter ส่ง • Shift+Enter ขึ้นบรรทัด • Esc หยุด • ทุกอย่างประมวลผลด้วย Ollama ในเครื่อง</div>
   </div>
 </main>
+
+<div id="viewer"><img alt=""></div>
 
 <dialog id="settings">
   <h2>⚙&nbsp; ตั้งค่า Local AI</h2>
@@ -363,7 +555,8 @@ let saveTimer = null, rafPending = false;
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID()
   : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {const r=Math.random()*16|0; return (c=="x"?r:(r&3|8)).toString(16);}));
-function setStatus(t){ $("status").textContent = t; }
+function setStatus(t, warn){ $("status").textContent = t; $("status").className = warn ? "warn" : ""; }
+const fmtSize = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" : (n / 1048576).toFixed(1) + " MB";
 function setConn(ok, t){ $("dot").className = "dot " + (ok ? "ok" : "bad"); $("conn").textContent = t; }
 async function copyText(text, msg){
   try { await navigator.clipboard.writeText(text); }
@@ -454,7 +647,8 @@ function renderHistory(){
   const ul = $("history"); ul.innerHTML = "";
   [...S.chats].sort((a, b) => (b.updated || 0) - (a.updated || 0)).forEach(chat => {
     if (q) {
-      const blob = [chat.title, ...chat.messages.map(m => m.content || "")].join(" ").toLowerCase();
+      const blob = [chat.title, ...chat.messages.map(m => (m.content || "") + " "
+        + (m.attachments || []).map(a => a.name).join(" "))].join(" ").toLowerCase();
       if (!blob.includes(q)) return;
     }
     const li = document.createElement("li");
@@ -510,7 +704,8 @@ function renderMessage(chat, i, m){
   const div = document.createElement("div");
   div.className = "msg";
   if (m.role === "user") {
-    div.innerHTML = `<div class="who user">คุณ</div><div class="bubble">${esc(m.content || "")}</div>`;
+    div.innerHTML = `<div class="who user">คุณ</div>` + renderAttachments(m)
+      + (m.content ? `<div class="bubble">${esc(m.content)}</div>` : "");
     return div;
   }
   const name = m.model || S.settings.model || "Local AI";
@@ -544,7 +739,87 @@ function renderMessage(chat, i, m){
 $("list").addEventListener("click", e => {
   if (e.target.dataset.act === "ccopy")
     copyText(e.target.closest(".code").querySelector("pre").textContent, "คัดลอกโค้ดแล้ว");
+  if (e.target.dataset.act === "zoom") {
+    $("viewer").querySelector("img").src = e.target.src; $("viewer").style.display = "flex";
+  }
 });
+$("viewer").onclick = () => { $("viewer").style.display = "none"; };
+
+// ------------------------------------------------------------ attachments
+// รูปภาพ → ย่อขนาดในเบราว์เซอร์แล้วส่งเป็น base64 ใน field "images" ของ Ollama (ต้องใช้โมเดล vision)
+// เอกสาร → ส่งให้ Flask แปลงเป็นข้อความ แล้วแนบเข้าไปในข้อความถึงโมเดล
+const IMG_MAX = 1600;
+let pending = [];   // ไฟล์ที่แนบไว้ในช่องพิมพ์ ยังไม่ได้ส่ง
+
+function loadImage(file){
+  return new Promise((ok, fail) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, IMG_MAX / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      g.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      ok(c.toDataURL("image/jpeg", 0.9));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); fail(new Error("เปิดรูปไม่ได้")); };
+    img.src = url;
+  });
+}
+
+function addFiles(files){
+  for (const file of files) {
+    const it = {id:uuid(), name:file.name || "pasted.png", size:file.size,
+                kind:(file.type || "").startsWith("image/") ? "image" : "file", status:"loading"};
+    if (it.kind === "image") {
+      it.promise = loadImage(file).then(d => { it.data = d; it.status = "ok"; });
+    } else {
+      const fd = new FormData(); fd.append("file", file);
+      it.promise = fetch("/api/extract", {method:"POST", body:fd})
+        .then(async r => { const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || "HTTP " + r.status); return j; })
+        .then(j => { it.text = j.text; it.chars = j.chars; it.truncated = j.truncated; it.status = "ok"; });
+    }
+    it.promise = it.promise.catch(e => { it.status = "error"; it.err = e.message; setStatus(e.message, true); })
+                           .finally(renderChips);
+    pending.push(it);
+  }
+  renderChips();
+}
+
+function renderChips(){
+  const box = $("chips"); box.innerHTML = "";
+  for (const it of pending) {
+    const d = document.createElement("div");
+    d.className = "chip" + (it.status === "error" ? " err" : "");
+    const info = it.status === "loading" ? "กำลังอ่าน..." : it.status === "error" ? it.err
+      : it.kind === "image" ? "รูปภาพ · " + fmtSize(it.size)
+      : `${(it.chars || 0).toLocaleString()} ตัวอักษร${it.truncated ? " (ถูกตัด)" : ""}`;
+    d.innerHTML = (it.kind === "image" && it.data ? `<img src="${it.data}" alt="">` : `<span class="ico">${it.kind === "image" ? "🖼" : "📄"}</span>`)
+      + `<div style="min-width:0"><div class="nm" title="${esc(it.name)}">${esc(it.name)}</div><div class="sz" title="${esc(info)}">${esc(info)}</div></div>`
+      + `<button class="rm" title="เอาออก">×</button>`;
+    d.querySelector(".rm").onclick = () => { pending = pending.filter(x => x !== it); renderChips(); };
+    box.appendChild(d);
+  }
+}
+
+// ข้อความที่ส่งถึงโมเดลจริง = ข้อความผู้ใช้ + เนื้อหาเอกสารที่แนบ
+function modelContent(m){
+  let s = m.content || "";
+  for (const a of m.attachments || [])
+    if (a.kind === "file") s += `\n\n<file name="${a.name}">\n${a.text}\n</file>`;
+  return s;
+}
+const modelImages = m => (m.attachments || []).filter(a => a.kind === "image").map(a => a.data.split(",")[1]);
+
+function renderAttachments(m){
+  const atts = m.attachments || [];
+  if (!atts.length) return "";
+  return `<div class="att">` + atts.map((a, j) => a.kind === "image"
+    ? `<img src="${a.data}" alt="${esc(a.name)}" title="${esc(a.name)}" data-act="zoom">`
+    : `<details><summary>📄 ${esc(a.name)} · ${(a.chars || 0).toLocaleString()} ตัวอักษร${a.truncated ? " (ถูกตัด)" : ""}</summary><pre>${esc(a.text)}</pre></details>`
+  ).join("") + `</div>`;
+}
 
 // ------------------------------------------------------------ models
 async function refreshModels(){
@@ -601,15 +876,35 @@ async function sendMessage(regenerate){
     if (msgs.length && msgs[msgs.length - 1].role === "assistant") msgs.pop();
     if (!msgs.length || msgs[msgs.length - 1].role !== "user") { renderAll(); return; }
   } else {
-    const text = box.value.trim(); if (!text) return;
-    msgs.push({role:"user", content:text});
-    box.value = ""; autosize();
+    let text = box.value.trim();
+    if (!text && !pending.length) return;
+    if (pending.some(p => p.status === "loading")) {
+      if (sendMessage.waiting) return;           // กันกดส่งซ้ำระหว่างรออ่านไฟล์
+      sendMessage.waiting = true;
+      setStatus("กำลังอ่านไฟล์แนบ รอสักครู่...");
+      try { await Promise.all(pending.map(p => p.promise)); } finally { sendMessage.waiting = false; }
+      if (active) return;
+      text = box.value.trim();
+    }
+    const atts = pending.filter(p => p.status === "ok").map(p => p.kind === "image"
+      ? {kind:"image", name:p.name, data:p.data}
+      : {kind:"file", name:p.name, text:p.text, chars:p.chars, truncated:p.truncated});
+    if (!text && !atts.length) { setStatus("ไม่มีไฟล์แนบที่อ่านได้", true); return; }
+    if (!text) text = "ช่วยวิเคราะห์ไฟล์ที่แนบมา";
+    const um = {role:"user", content:text};
+    if (atts.length) um.attachments = atts;
+    msgs.push(um);
+    box.value = ""; autosize(); pending = []; renderChips();
     if (chat.title === "แชตใหม่") chat.title = text.replace(/\s+/g, " ").slice(0, 42);
   }
   const s = S.settings;
   if (!s.model) { setStatus("ยังไม่มีโมเดล กรุณาติดตั้งโมเดลใน Ollama ก่อน"); save(); renderAll(); return; }
   chat.updated = Date.now();
-  const previous = msgs.filter(m => m.role === "user" || m.role === "assistant").map(m => ({role:m.role, content:m.content || ""}));
+  const previous = msgs.filter(m => m.role === "user" || m.role === "assistant").map(m => {
+    const o = {role:m.role, content:modelContent(m)};
+    const imgs = modelImages(m); if (imgs.length) o.images = imgs;
+    return o;
+  });
   const a = {role:"assistant", model:s.model, content:"", thinking:"", streaming:true};
   msgs.push(a);
   const mx = parseInt(s.maxHistory) || 0;
@@ -621,7 +916,14 @@ async function sendMessage(regenerate){
 
   const me = active = {ctl:new AbortController(), msg:a, inThink:false, buf:"", seen:false};
   setBusy(true); save(); renderAll();
-  setStatus("AI กำลังสร้างคำตอบ... กด Esc หรือปุ่มหยุดเพื่อยกเลิก");
+  // ประมาณ token คร่าวๆ (ไทย/ตัวเลขในตาราง ~3 ตัวอักษรต่อ token) — ถ้าเกิน num_ctx Ollama จะตัดส่วนต้นทิ้งเงียบๆ
+  const estTok = Math.round(body.messages.reduce((n, m) => n + m.content.length, 0) / 3)
+               + body.messages.reduce((n, m) => n + (m.images ? m.images.length * 800 : 0), 0);
+  if (estTok > (parseInt(s.numCtx) || 8192) * 0.85)
+    setStatus(`⚠ ข้อความ+ไฟล์แนบประมาณ ${estTok.toLocaleString()} tokens เกิน Context Window (${s.numCtx}) — `
+            + `AI อาจเห็นข้อมูลไม่ครบ ควรเพิ่ม num_ctx ในตั้งค่า`, true);
+  else
+    setStatus("AI กำลังสร้างคำตอบ... กด Esc หรือปุ่มหยุดเพื่อยกเลิก");
   try {
     const r = await fetch("/api/chat", {method:"POST", headers:{"Content-Type":"application/json"},
                                         body:JSON.stringify(body), signal:me.ctl.signal});
@@ -682,7 +984,11 @@ function exportMd(chat){
   const c = chat || current();
   if (!c || !c.messages.length) return;
   let txt = "# " + c.title + "\n\n";
-  for (const m of c.messages) txt += "## " + (m.role === "user" ? "คุณ" : (m.model || "AI")) + "\n\n" + (m.content || "") + "\n\n";
+  for (const m of c.messages) {
+    txt += "## " + (m.role === "user" ? "คุณ" : (m.model || "AI")) + "\n\n";
+    for (const a of m.attachments || []) txt += `> แนบไฟล์: ${a.name}\n\n`;
+    txt += (m.content || "") + "\n\n";
+  }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([txt], {type:"text/markdown;charset=utf-8"}));
   a.download = "ollama-chat-" + new Date().toISOString().slice(0, 10) + ".md";
@@ -728,10 +1034,23 @@ $("sTemp").oninput = updTemp;
 $("sSave").onclick = saveSettings;
 $("sCancel").onclick = () => $("settings").close();
 $("prompt").addEventListener("input", autosize);
+$("attach").onclick = () => $("fileInput").click();
+$("fileInput").onchange = e => { addFiles([...e.target.files]); e.target.value = ""; };
+$("prompt").addEventListener("paste", e => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) { e.preventDefault(); addFiles(files); }
+});
+const comp = $("composer");
+["dragenter", "dragover"].forEach(t => comp.addEventListener(t, e => { e.preventDefault(); comp.classList.add("drag"); }));
+["dragleave", "drop"].forEach(t => comp.addEventListener(t, e => { e.preventDefault(); comp.classList.remove("drag"); }));
+comp.addEventListener("drop", e => addFiles([...e.dataTransfer.files]));
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => e.preventDefault());
 $("prompt").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(false); }
 });
 document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && $("viewer").style.display === "flex") { $("viewer").style.display = "none"; return; }
   if (e.key === "Escape" && active && !$("settings").open) stop();
   if (e.altKey && (e.key === "n" || e.key === "N")) { e.preventDefault(); newChat(); }
 });

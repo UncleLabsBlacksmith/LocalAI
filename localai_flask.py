@@ -485,6 +485,36 @@ details.thought .tbody{background:var(--thought-bg);color:var(--thought-fg);font
 #viewer img{max-width:94vw;max-height:94vh}
 
 /* settings */
+/* ปุ่มวิธีใช้ + หน้าต่างวิธีใช้ */
+#helpBtn{width:30px;height:30px;flex:none;border-radius:50%;border:1px solid var(--accent);background:transparent;
+  color:var(--accent);font-weight:700;font-size:15px;padding:0;margin-left:2px}
+#helpBtn:hover{background:var(--accent);color:var(--accent-text)}
+dialog#help{width:min(720px,94vw);max-height:90vh;padding:0}
+#help .hd{position:sticky;top:0;background:var(--panel);display:flex;align-items:center;justify-content:space-between;
+  padding:16px 22px 12px;border-bottom:1px solid var(--line);z-index:1}
+#help .hd h2{margin:0}
+#help .hd button{background:none;border:0;color:var(--muted);font-size:22px;padding:0 4px}
+#help .hd button:hover{color:var(--text)}
+#help .hd button:focus{outline:none}
+@media (max-width:520px){#help .bd{padding:4px 14px 18px;font-size:14px}.step{gap:10px}.step .no{width:28px;height:28px;font-size:14px}#help th,#help td{padding:5px 6px}}
+#help .bd{padding:6px 22px 22px;font-size:14.5px}
+.step{display:flex;gap:14px;margin-top:18px}
+.step .no{flex:none;width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--accent-text);
+  font-weight:700;display:flex;align-items:center;justify-content:center;font-size:16px}
+.step .tx{flex:1;min-width:0}
+.step h3{margin:3px 0 6px;font-size:16px}
+.step p,.step li{margin:0 0 6px;color:#dadadd}
+.step ul,.step ol{padding-left:20px;margin:4px 0 6px}
+#help code,#help kbd{font-family:var(--mono);font-size:13px;background:var(--inline-code);padding:1px 6px;border-radius:4px}
+#help a{color:var(--link)}
+#help .tip{background:#233a30;border-left:3px solid var(--accent);padding:8px 12px;border-radius:6px;margin:8px 0;color:#dfeee6}
+#help .warn{background:#3a3023;border-left:3px solid #f1c27d;padding:8px 12px;border-radius:6px;margin:8px 0;color:#f3e6d2}
+#help table{width:100%;border-collapse:collapse;margin:6px 0 8px;font-size:13.5px}
+#help th,#help td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+#help th{background:var(--field);color:var(--muted);font-weight:600}
+#help td code{white-space:nowrap}
+#help .tbl{overflow-x:auto}
+#help h4{margin:22px 0 6px;font-size:15px;color:var(--accent)}
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:18px 22px;width:min(520px,92vw)}
 dialog::backdrop{background:rgba(0,0,0,.55)}
 dialog h2{margin:0 0 4px;font-size:18px}
@@ -545,6 +575,7 @@ dialog .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
     <div id="title">แชตใหม่</div>
     <button class="btn small" id="regen">↻ ตอบใหม่</button>
     <button class="btn small" id="export">↓ .md</button>
+    <button id="helpBtn" title="วิธีใช้โปรแกรม">?</button>
   </div>
   <div id="messages"><div class="inner" id="list"></div></div>
   <div class="composer-wrap">
@@ -561,6 +592,101 @@ dialog .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
 </main>
 
 <div id="viewer"><img alt=""></div>
+
+<dialog id="help">
+  <div class="hd"><h2>❓ วิธีใช้ Local AI Chat</h2><button id="helpClose" title="ปิด">×</button></div>
+  <div class="bd">
+    <p style="margin-top:14px">โปรแกรมนี้เป็น "หน้าจอแชต" ส่วน "สมองของ AI" คือโปรแกรม <b>Ollama</b> ที่ต้องติดตั้งในเครื่องก่อน
+      ทุกอย่างทำงานในเครื่องของเรา ไม่ส่งข้อมูลออกอินเทอร์เน็ต</p>
+
+    <div class="step"><div class="no">1</div><div class="tx">
+      <h3>ติดตั้ง Ollama</h3>
+      <ol>
+        <li>เข้าเว็บ <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a></li>
+        <li>เลือก Windows หรือ macOS แล้วกดดาวน์โหลด</li>
+        <li>ดับเบิลคลิกไฟล์ที่ได้ แล้วกด Install เหมือนลงโปรแกรมทั่วไป</li>
+      </ol>
+      <div class="tip">ติดตั้งเสร็จจะเห็นไอคอนรูป 🦙 ที่มุมขวาล่างของ Windows (ข้างนาฬิกา) แปลว่า Ollama ทำงานอยู่</div>
+    </div></div>
+
+    <div class="step"><div class="no">2</div><div class="tx">
+      <h3>เช็กว่าเครื่องเรารองรับโมเดลขนาดไหน</h3>
+      <p>โมเดลใหญ่ = ฉลาดกว่า แต่ต้องใช้หน่วยความจำการ์ดจอ (VRAM) มากกว่า ดูได้แบบนี้:</p>
+      <ol>
+        <li>กด <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Esc</kbd> เปิด Task Manager</li>
+        <li>ไปแท็บ <b>Performance</b> → คลิก <b>GPU</b></li>
+        <li>ดูตัวเลข <b>Dedicated GPU memory</b> เช่น 8.0 GB = การ์ดจอมี VRAM 8 GB</li>
+      </ol>
+      <p>Mac รุ่นชิป M ให้ดูจำนวน RAM ทั้งหมดแทน (เมนูรูปแอปเปิ้ลมุมซ้ายบน → About This Mac) แล้วใช้ประมาณ 2 ใน 3 ของ RAM</p>
+    </div></div>
+
+    <div class="step"><div class="no">3</div><div class="tx">
+      <h3>เลือกโมเดลให้เหมาะกับเครื่อง</h3>
+      <div class="tbl"><table>
+        <tr><th>หน่วยความจำการ์ดจอ</th><th>โมเดลที่แนะนำ</th><th>เหมาะกับ</th></tr>
+        <tr><td>ไม่มีการ์ดจอ / ไม่เกิน 4 GB</td><td><code>qwen3.5:2b</code></td><td>ถาม-ตอบสั้นๆ, ทดลองใช้ (ดูรูปได้)</td></tr>
+        <tr><td>6 – 8 GB</td><td><code>qwen3:8b</code> หรือ <code>gemma3:4b</code></td><td>ใช้งานทั่วไป ภาษาไทยดี (gemma3 ดูรูปได้)</td></tr>
+        <tr><td>12 – 16 GB</td><td><code>qwen3:14b</code> หรือ <code>gemma3:12b</code></td><td>งานจริงจัง สรุปเอกสาร วิเคราะห์ตาราง</td></tr>
+        <tr><td>24 GB ขึ้นไป</td><td><code>qwen3.5:27b</code> หรือ <code>gemma3:27b</code></td><td>คุณภาพสูงสุดในเครื่องเดียว</td></tr>
+      </table></div>
+      <p>เลือกตามงานเฉพาะทาง:</p>
+      <ul>
+        <li><b>เขียนโค้ด</b> → <code>qwen2.5-coder:7b</code> (8 GB) หรือ <code>qwen3-coder:30b</code> (24 GB)</li>
+        <li><b>วิเคราะห์รูปภาพ / อ่านแบบงาน / OCR</b> → ต้องเป็นโมเดลที่ดูรูปได้ เช่น <code>gemma3</code>, <code>qwen2.5vl</code>, <code>qwen3.5</code></li>
+        <li><b>คิดเป็นขั้นตอน (Thinking)</b> → <code>qwen3</code> หรือ <code>deepseek-r1</code> แล้วเปิดโหมด Thinking ใน ⚙ ตั้งค่า</li>
+      </ul>
+      <div class="warn"><b>กฎง่ายๆ:</b> ขนาดไฟล์โมเดลควรน้อยกว่า VRAM ประมาณ 1–2 GB ถ้าใหญ่เกิน โปรแกรมยังทำงานได้แต่จะ <b>ช้าลงมาก</b>
+        เพราะต้องไปใช้ RAM แทน • ชื่อรุ่นใหม่ๆ ออกเรื่อยๆ ถ้าในรายการมีเวอร์ชันใหม่กว่าของตระกูลเดียวกัน (เช่น qwen, gemma) เลือกตัวใหม่ได้เลย</div>
+    </div></div>
+
+    <div class="step"><div class="no">4</div><div class="tx">
+      <h3>ดาวน์โหลดโมเดล แล้วทดสอบด้วยคำว่า hello</h3>
+      <ol>
+        <li>เปิดโปรแกรม <b>Ollama</b> (จากเมนู Start หรือคลิกไอคอน 🦙)</li>
+        <li>ที่ช่องพิมพ์ด้านล่าง กดชื่อโมเดลเพื่อเปิดรายการ แล้ว<b>เลือกโมเดล</b>ตามตารางข้อ 3
+          (ถ้าไม่มีในรายการ กดค้นหาแล้วพิมพ์ชื่อได้)</li>
+        <li>พิมพ์ <code>hello</code> แล้วกด Enter</li>
+        <li>ครั้งแรก Ollama จะ<b>ดาวน์โหลดโมเดลอัตโนมัติ</b> (ไฟล์หลาย GB รอสักครู่ตามความเร็วเน็ต)</li>
+        <li>ถ้า AI ตอบกลับมาได้ = ติดตั้งสำเร็จ 🎉</li>
+      </ol>
+      <div class="warn">โมเดลที่มีคำว่า <b>cloud</b> ต่อท้าย ประมวลผลบนเซิร์ฟเวอร์ของ Ollama ไม่ใช่ในเครื่อง
+        ถ้าต้องการความเป็นส่วนตัว ให้เลือกตัวที่ไม่มีคำว่า cloud</div>
+      <p>หรือใช้คำสั่งใน Command Prompt ก็ได้ เช่น <code>ollama pull qwen3:8b</code></p>
+    </div></div>
+
+    <div class="step"><div class="no">5</div><div class="tx">
+      <h3>เริ่มใช้งานในโปรแกรมนี้</h3>
+      <ol>
+        <li>ที่แถบด้านซ้าย กด <b>↻ โหลดรายชื่อโมเดลใหม่</b></li>
+        <li>มุมซ้ายล่างต้องเป็น <span style="color:var(--accent)">●</span> <b>เชื่อมต่อแล้ว</b></li>
+        <li>เลือกโมเดลในช่อง "โมเดลใน Ollama"</li>
+        <li>พิมพ์ <code>hello</code> ในช่องด้านล่าง แล้วกด Enter ถ้า AI ตอบ = พร้อมใช้งาน</li>
+      </ol>
+    </div></div>
+
+    <div class="step"><div class="no">6</div><div class="tx">
+      <h3>ความสามารถที่ควรรู้</h3>
+      <ul>
+        <li><b>📎 แนบไฟล์</b> — รูปภาพ, Excel, CSV, Word, PDF, PowerPoint, G-code (ลากไฟล์มาวาง หรือกด <kbd>Ctrl</kbd>+<kbd>V</kbd> วางรูปก็ได้)</li>
+        <li><b>ไฟล์ใหญ่</b> — ไปที่ ⚙ ตั้งค่า แล้วเพิ่ม <b>Context Window</b> เป็น 16384 หรือ 32768 ไม่อย่างนั้น AI จะอ่านไม่ครบ (ใช้หน่วยความจำมากขึ้น)</li>
+        <li><b>System Prompt</b> ใน ⚙ ตั้งค่า — กำหนดบทบาท เช่น "คุณคือวิศวกรงานกลึง ตอบเป็นภาษาไทย"</li>
+        <li><b>คีย์ลัด</b> — <kbd>Enter</kbd> ส่ง • <kbd>Shift</kbd>+<kbd>Enter</kbd> ขึ้นบรรทัด • <kbd>Esc</kbd> หยุด • <kbd>Alt</kbd>+<kbd>N</kbd> แชตใหม่</li>
+        <li><b>ใช้จากเครื่องอื่น</b> — เครื่องในวง LAN เปิด <code id="helpUrl">http://IP-เครื่องนี้:5050</code> ได้เลย ไม่ต้องติดตั้งอะไร</li>
+      </ul>
+    </div></div>
+
+    <h4>🔧 แก้ปัญหาที่พบบ่อย</h4>
+    <div class="tbl"><table>
+      <tr><th>อาการ</th><th>วิธีแก้</th></tr>
+      <tr><td>มุมซ้ายล่างเป็น <span style="color:var(--red)">●</span> เชื่อมต่อไม่ได้</td><td>Ollama ยังไม่ได้เปิด → เปิดโปรแกรม Ollama แล้วกด ↻</td></tr>
+      <tr><td>ขึ้นว่า "ยังไม่มีโมเดล"</td><td>ยังไม่ได้ดาวน์โหลดโมเดล → ทำข้อ 4</td></tr>
+      <tr><td>ตอบช้ามาก (ไม่กี่คำต่อวินาที)</td><td>โมเดลใหญ่เกินการ์ดจอ → เปลี่ยนเป็นรุ่นเล็กลงตามตารางข้อ 3</td></tr>
+      <tr><td>แนบรูปแล้ว AI บอกว่ามองไม่เห็น</td><td>โมเดลนั้นดูรูปไม่ได้ → ใช้ gemma3, qwen2.5vl หรือ qwen3.5</td></tr>
+      <tr><td>วิเคราะห์ Excel แล้วข้อมูลหายบางส่วน</td><td>เพิ่ม Context Window ใน ⚙ ตั้งค่า (ดูข้อ 6)</td></tr>
+      <tr><td>เครื่องอื่นเปิดหน้านี้ไม่ได้</td><td>อนุญาต Python / พอร์ต 5050 ใน Windows Firewall</td></tr>
+    </table></div>
+  </div>
+</dialog>
 
 <dialog id="settings">
   <h2>⚙&nbsp; ตั้งค่า Local AI</h2>
@@ -1005,7 +1131,7 @@ async function refreshModels(){
   try {
     const r = await fetch("/api/models"); const j = await r.json();
     if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
-    if (!j.models.length) { setOptions([], "ยังไม่มีโมเดล"); setConn(false, "ยังไม่มีโมเดล"); return; }
+    if (!j.models.length) { setOptions([], "ยังไม่มีโมเดล"); setConn(false, "ยังไม่มีโมเดล"); autoHelp(); return; }
     setOptions(j.models);
     if (!j.models.includes(s.model)) { s.model = j.models[0]; save(); }
     sel.value = s.model;
@@ -1013,6 +1139,7 @@ async function refreshModels(){
   } catch (e) {
     setOptions(s.model ? [s.model] : [], "ไม่พบ Ollama");
     setConn(false, "เชื่อมต่อไม่ได้");
+    autoHelp();
     setStatus("เชื่อมต่อ Ollama ไม่ได้ ตรวจว่า Ollama เปิดอยู่: " + e.message);
   } finally { btn.disabled = false; }
 }
@@ -1199,6 +1326,18 @@ $("refresh").onclick = refreshModels;
 $("search").oninput = renderHistory;
 $("model").onchange = e => { S.settings.model = e.target.value; save(); };
 $("openSettings").onclick = openSettings;
+function openHelp(){
+  if (!/^(127\.|localhost)/.test(location.hostname)) $("helpUrl").textContent = location.origin;
+  $("help").showModal(); $("help").scrollTop = 0;
+}
+$("helpBtn").onclick = openHelp;
+$("helpClose").onclick = () => $("help").close();
+$("help").addEventListener("click", e => { if (e.target === $("help")) $("help").close(); });  // คลิกนอกกรอบเพื่อปิด
+// เปิดวิธีใช้ให้อัตโนมัติครั้งแรก ถ้ายังต่อ Ollama ไม่ได้หรือยังไม่มีโมเดล (ครั้งเดียวต่อเบราว์เซอร์)
+function autoHelp(){
+  try { if (localStorage.getItem("localai_help_seen")) return; localStorage.setItem("localai_help_seen", "1"); } catch { return; }
+  if (!$("settings").open) openHelp();
+}
 // จอกว้าง: ☰ ซ่อน/แสดงแถบข้าง  •  จอแคบ: ☰ เปิดลิ้นชัก แตะพื้นหลังหรือเลือกแชตเพื่อปิด
 const narrow = matchMedia("(max-width:860px)");
 const closeDrawer = () => document.body.classList.remove("side-open");
